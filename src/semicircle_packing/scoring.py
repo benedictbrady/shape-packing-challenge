@@ -14,6 +14,7 @@ from .geometry import (
     semicircle_boundary_points,
     semicircles_overlap,
     semicircle_contained_in_circle,
+    farthest_boundary_point_from,
 )
 
 
@@ -87,10 +88,31 @@ def minimum_enclosing_circle(points: np.ndarray) -> tuple[float, float, float]:
 
 
 def compute_mec(semicircles: list[Semicircle]) -> tuple[float, float, float]:
-    """Compute the MEC enclosing all semicircles by sampling boundary points."""
+    """Compute the MEC enclosing all semicircles.
+
+    Uses sampled boundary points for the initial Welzl solve, then iteratively
+    refines by analytically finding the true farthest boundary point on each
+    semicircle from the current MEC center. Converges to machine precision.
+    """
     from .config import MEC_BOUNDARY_POINTS
     all_pts = np.vstack([semicircle_boundary_points(sc, MEC_BOUNDARY_POINTS) for sc in semicircles])
-    return minimum_enclosing_circle(all_pts)
+    cx, cy, cr = minimum_enclosing_circle(all_pts)
+
+    for _ in range(20):
+        new_pts = []
+        for sc in semicircles:
+            fx, fy = farthest_boundary_point_from(sc, cx, cy)
+            dist = math.hypot(fx - cx, fy - cy)
+            if dist > cr + 1e-12:
+                new_pts.append([fx, fy])
+
+        if not new_pts:
+            break
+
+        all_pts = np.vstack([all_pts, np.array(new_pts)])
+        cx, cy, cr = minimum_enclosing_circle(all_pts)
+
+    return cx, cy, cr
 
 
 # ---------------------------------------------------------------------------

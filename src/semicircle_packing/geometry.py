@@ -72,9 +72,44 @@ def semicircles_overlap(a: Semicircle, b: Semicircle) -> bool:
     return pa.intersection(pb).area > OVERLAP_TOL
 
 
+def farthest_boundary_point_from(sc: Semicircle, qx: float, qy: float) -> tuple[float, float]:
+    """Find the point on the semicircle boundary farthest from (qx, qy).
+
+    Analytical computation — no sampling needed.
+    On the arc, distance from (qx, qy) is maximized at the angle pointing
+    from query toward the semicircle center, clamped to the arc range.
+    On the flat edge (a line segment), the farthest point is always an endpoint.
+    """
+    from .config import RADIUS
+
+    dx = sc.x - qx
+    dy = sc.y - qy
+
+    candidates: list[tuple[float, float]] = []
+
+    # Arc: maximize dx*cos(a) + dy*sin(a) over a in [theta-pi/2, theta+pi/2]
+    optimal_angle = math.atan2(dy, dx)
+    # Check if optimal_angle falls within the arc range
+    diff = math.atan2(math.sin(optimal_angle - sc.theta), math.cos(optimal_angle - sc.theta))
+    if -math.pi / 2 <= diff <= math.pi / 2:
+        candidates.append((sc.x + RADIUS * math.cos(optimal_angle),
+                           sc.y + RADIUS * math.sin(optimal_angle)))
+
+    # Arc endpoints (which are also flat edge endpoints)
+    a1 = sc.theta - math.pi / 2
+    a2 = sc.theta + math.pi / 2
+    candidates.append((sc.x + RADIUS * math.cos(a1), sc.y + RADIUS * math.sin(a1)))
+    candidates.append((sc.x + RADIUS * math.cos(a2), sc.y + RADIUS * math.sin(a2)))
+
+    return max(candidates, key=lambda p: (p[0] - qx) ** 2 + (p[1] - qy) ** 2)
+
+
 def semicircle_contained_in_circle(sc: Semicircle, cx: float, cy: float, cr: float) -> bool:
-    """Check whether a semicircle is fully contained in a circle (cx, cy, cr)."""
+    """Check whether a semicircle is fully contained in a circle (cx, cy, cr).
+
+    Uses analytical farthest-point computation instead of sampling.
+    """
     from .config import CONTAINMENT_TOL
-    pts = semicircle_boundary_points(sc)
-    dists = np.sqrt((pts[:, 0] - cx) ** 2 + (pts[:, 1] - cy) ** 2)
-    return bool(np.all(dists <= cr + CONTAINMENT_TOL))
+    fx, fy = farthest_boundary_point_from(sc, cx, cy)
+    dist = math.hypot(fx - cx, fy - cy)
+    return dist <= cr + CONTAINMENT_TOL
