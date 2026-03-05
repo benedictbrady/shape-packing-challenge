@@ -50,16 +50,25 @@ def _load_solution(path: str) -> list:
     if not isinstance(data, list):
         raise ValueError("Expected a JSON array of {x, y, theta} objects")
 
+    import math
+
     semicircles = []
+    has_degree_warning = False
     for i, item in enumerate(data):
         for key in ("x", "y", "theta"):
             if key not in item:
                 raise ValueError(f"Item {i} missing required field '{key}'")
+        theta = float(item["theta"])
+        if abs(theta) > 2 * math.pi and not has_degree_warning:
+            print(f"  WARNING: theta={theta} looks like degrees, not radians.")
+            print(f"           Theta should be in radians (e.g. pi = {math.pi:.6f}).")
+            print()
+            has_degree_warning = True
         # Round to 6 decimal places — the server applies the same rounding
         semicircles.append(Semicircle(
             x=round(float(item["x"]), 6),
             y=round(float(item["y"]), 6),
-            theta=round(float(item["theta"]), 6),
+            theta=round(theta, 6),
         ))
 
     return semicircles
