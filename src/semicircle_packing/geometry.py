@@ -193,23 +193,17 @@ def semicircles_overlap(a: Semicircle, b: Semicircle) -> bool:
     if math.hypot(a.x - b.x, a.y - b.y) > 2 * RADIUS:
         return False
 
-    # (1) Check if characteristic interior points of one are inside the other
+    # (1) Check if interior points of one semicircle are inside the other.
+    #     Sample at multiple angles across each semicircle's interior to avoid
+    #     missing overlaps that don't align with the theta direction.
     for s1, s2 in [(a, b), (b, a)]:
-        # Interior point along the theta direction
-        for frac in [0.3, 0.6]:
-            px = s1.x + frac * RADIUS * math.cos(s1.theta)
-            py = s1.y + frac * RADIUS * math.sin(s1.theta)
-            if _point_strictly_inside_semicircle(px, py, s2):
-                return True
-        # Flat-edge endpoints (on the boundary of s1, but could be inside s2)
-        for ep in _semicircle_endpoints(s1):
-            if _point_strictly_inside_semicircle(ep[0], ep[1], s2):
-                return True
-        # Arc midpoint (on boundary of s1, could be inside s2)
-        arc_mid_x = s1.x + RADIUS * math.cos(s1.theta)
-        arc_mid_y = s1.y + RADIUS * math.sin(s1.theta)
-        if _point_strictly_inside_semicircle(arc_mid_x, arc_mid_y, s2):
-            return True
+        for angle_offset in [-math.pi / 3, -math.pi / 6, 0, math.pi / 6, math.pi / 3]:
+            angle = s1.theta + angle_offset
+            for frac in [0.3, 0.6, 0.9]:
+                px = s1.x + frac * RADIUS * math.cos(angle)
+                py = s1.y + frac * RADIUS * math.sin(angle)
+                if _point_strictly_inside_semicircle(px, py, s2):
+                    return True
 
     # (2) Check boundary crossings
     a_e1, a_e2 = _semicircle_endpoints(a)
@@ -222,17 +216,30 @@ def semicircles_overlap(a: Semicircle, b: Semicircle) -> bool:
     all_crossings.extend(_segment_segment_intersection(a_e1, a_e2, b_e1, b_e2))
 
     if len(all_crossings) >= 2:
-        # Two convex shapes with 2+ boundary crossings overlap unless
-        # the crossings are only at shared vertices (e.g. flat edges meeting
-        # at a point). Check if the midpoint between any two crossings is
-        # strictly inside both semicircles.
+        # Two convex shapes with 2+ boundary crossings overlap. Verify by
+        # finding a point strictly inside both. Try: the straight-line midpoint
+        # of crossing pairs, then nudge toward each semicircle's interior
+        # (handles cases where the midpoint lands on a half-plane boundary).
         for i in range(len(all_crossings)):
             for j in range(i + 1, len(all_crossings)):
                 mid_x = (all_crossings[i][0] + all_crossings[j][0]) / 2
                 mid_y = (all_crossings[i][1] + all_crossings[j][1]) / 2
-                if (_point_strictly_inside_semicircle(mid_x, mid_y, a)
-                        and _point_strictly_inside_semicircle(mid_x, mid_y, b)):
-                    return True
+
+                candidates = [(mid_x, mid_y)]
+                for sc in [a, b]:
+                    # Nudge midpoint toward sc's interior (along theta direction)
+                    nx = mid_x + 0.1 * RADIUS * math.cos(sc.theta)
+                    ny = mid_y + 0.1 * RADIUS * math.sin(sc.theta)
+                    candidates.append((nx, ny))
+                    # Nudge toward sc's center
+                    nx = mid_x + 0.1 * (sc.x - mid_x)
+                    ny = mid_y + 0.1 * (sc.y - mid_y)
+                    candidates.append((nx, ny))
+
+                for cx, cy in candidates:
+                    if (_point_strictly_inside_semicircle(cx, cy, a)
+                            and _point_strictly_inside_semicircle(cx, cy, b)):
+                        return True
 
     return False
 
