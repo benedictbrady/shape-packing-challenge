@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from shapely.geometry import Polygon, Point
 
-from .config import POLYGON_ARC_POINTS, MEC_BOUNDARY_POINTS
+from .config import POLYGON_ARC_POINTS, OVERLAP_TOL, MEC_BOUNDARY_POINTS
 
 
 @dataclass(frozen=True)
@@ -181,67 +181,18 @@ def _semicircle_endpoints(sc: Semicircle) -> tuple[tuple[float, float], tuple[fl
 
 
 def semicircles_overlap(a: Semicircle, b: Semicircle) -> bool:
-    """Analytical overlap check: True if two semicircles share positive interior area.
+    """Return True if two semicircles have overlapping interior area.
 
-    A semicircle is the intersection of a disk and a half-plane, so overlap is
-    checked via: (1) interior point containment, and (2) boundary crossings
-    (arc-arc, arc-segment, segment-segment). No polygon approximation.
+    Uses high-resolution Shapely polygon intersection. The polygon uses 1024
+    arc points per semicircle, giving positional error < 5e-7 — far below
+    any meaningful overlap.
     """
-    from .config import RADIUS
-
-    # Quick reject: centers too far apart for any overlap
+    from .config import RADIUS, OVERLAP_TOL
     if math.hypot(a.x - b.x, a.y - b.y) > 2 * RADIUS:
         return False
-
-    # (1) Check if interior points of one semicircle are inside the other.
-    #     Sample at multiple angles across each semicircle's interior to avoid
-    #     missing overlaps that don't align with the theta direction.
-    for s1, s2 in [(a, b), (b, a)]:
-        for angle_offset in [-math.pi / 3, -math.pi / 6, 0, math.pi / 6, math.pi / 3]:
-            angle = s1.theta + angle_offset
-            for frac in [0.3, 0.6, 0.9]:
-                px = s1.x + frac * RADIUS * math.cos(angle)
-                py = s1.y + frac * RADIUS * math.sin(angle)
-                if _point_strictly_inside_semicircle(px, py, s2):
-                    return True
-
-    # (2) Check boundary crossings
-    a_e1, a_e2 = _semicircle_endpoints(a)
-    b_e1, b_e2 = _semicircle_endpoints(b)
-
-    all_crossings: list[tuple[float, float]] = []
-    all_crossings.extend(_arc_arc_intersections(a, b))
-    all_crossings.extend(_arc_segment_intersections(a, b_e1, b_e2))
-    all_crossings.extend(_arc_segment_intersections(b, a_e1, a_e2))
-    all_crossings.extend(_segment_segment_intersection(a_e1, a_e2, b_e1, b_e2))
-
-    if len(all_crossings) >= 2:
-        # Two convex shapes with 2+ boundary crossings overlap. Verify by
-        # finding a point strictly inside both. Try: the straight-line midpoint
-        # of crossing pairs, then nudge toward each semicircle's interior
-        # (handles cases where the midpoint lands on a half-plane boundary).
-        for i in range(len(all_crossings)):
-            for j in range(i + 1, len(all_crossings)):
-                mid_x = (all_crossings[i][0] + all_crossings[j][0]) / 2
-                mid_y = (all_crossings[i][1] + all_crossings[j][1]) / 2
-
-                candidates = [(mid_x, mid_y)]
-                for sc in [a, b]:
-                    # Nudge midpoint toward sc's interior (along theta direction)
-                    nx = mid_x + 0.1 * RADIUS * math.cos(sc.theta)
-                    ny = mid_y + 0.1 * RADIUS * math.sin(sc.theta)
-                    candidates.append((nx, ny))
-                    # Nudge toward sc's center
-                    nx = mid_x + 0.1 * (sc.x - mid_x)
-                    ny = mid_y + 0.1 * (sc.y - mid_y)
-                    candidates.append((nx, ny))
-
-                for cx, cy in candidates:
-                    if (_point_strictly_inside_semicircle(cx, cy, a)
-                            and _point_strictly_inside_semicircle(cx, cy, b)):
-                        return True
-
-    return False
+    pa = semicircle_polygon(a, 1024)
+    pb = semicircle_polygon(b, 1024)
+    return pa.intersection(pb).area > OVERLAP_TOL
 
 
 def farthest_boundary_point_from(sc: Semicircle, qx: float, qy: float) -> tuple[float, float]:
