@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import numpy as np
 from shapely.geometry import Polygon, Point
 
-from .config import POLYGON_ARC_POINTS, OVERLAP_TOL, MEC_BOUNDARY_POINTS
+from .config import POLYGON_ARC_POINTS, MEC_BOUNDARY_POINTS
 
 
 @dataclass(frozen=True)
@@ -65,11 +65,176 @@ def semicircle_boundary_points(sc: Semicircle, n: int = MEC_BOUNDARY_POINTS) -> 
     return np.vstack([arc, flat])
 
 
+def _point_strictly_inside_semicircle(px: float, py: float, sc: Semicircle) -> bool:
+    """Check if (px, py) is strictly inside the semicircle interior."""
+    from .config import RADIUS
+    dist_sq = (px - sc.x) ** 2 + (py - sc.y) ** 2
+    if dist_sq >= RADIUS ** 2 - 1e-10:
+        return False
+    dot = (px - sc.x) * math.cos(sc.theta) + (py - sc.y) * math.sin(sc.theta)
+    return dot > 1e-10
+
+
+def _angle_on_arc(angle: float, sc: Semicircle, tol: float = 1e-10) -> bool:
+    """Check if angle falls within the semicircle's arc range [theta-pi/2, theta+pi/2]."""
+    diff = math.atan2(math.sin(angle - sc.theta), math.cos(angle - sc.theta))
+    return -math.pi / 2 - tol <= diff <= math.pi / 2 + tol
+
+
+def _arc_arc_intersections(a: Semicircle, b: Semicircle) -> list[tuple[float, float]]:
+    """Find intersection points of two semicircular arcs (both radius R)."""
+    from .config import RADIUS
+    dx = b.x - a.x
+    dy = b.y - a.y
+    d = math.hypot(dx, dy)
+
+    if d > 2 * RADIUS - 1e-12 or d < 1e-12:
+        return []
+
+    h_sq = RADIUS ** 2 - (d / 2) ** 2
+    if h_sq < 1e-20:
+        return []
+    h = math.sqrt(h_sq)
+
+    mx = (a.x + b.x) / 2
+    my = (a.y + b.y) / 2
+    px, py = -dy / d, dx / d
+
+    points = []
+    for sign in [1, -1]:
+        ix = mx + sign * h * px
+        iy = my + sign * h * py
+        angle_a = math.atan2(iy - a.y, ix - a.x)
+        angle_b = math.atan2(iy - b.y, ix - b.x)
+        if _angle_on_arc(angle_a, a) and _angle_on_arc(angle_b, b):
+            points.append((ix, iy))
+
+    return points
+
+
+def _arc_segment_intersections(
+    arc_sc: Semicircle, seg_p1: tuple[float, float], seg_p2: tuple[float, float]
+) -> list[tuple[float, float]]:
+    """Find intersections of a semicircular arc with a line segment."""
+    from .config import RADIUS
+    sx, sy = seg_p1
+    ex, ey = seg_p2
+    ddx, ddy = ex - sx, ey - sy
+    fx, fy = sx - arc_sc.x, sy - arc_sc.y
+
+    a_coeff = ddx ** 2 + ddy ** 2
+    if a_coeff < 1e-14:
+        return []
+    b_coeff = 2 * (fx * ddx + fy * ddy)
+    c_coeff = fx ** 2 + fy ** 2 - RADIUS ** 2
+
+    disc = b_coeff ** 2 - 4 * a_coeff * c_coeff
+    if disc < 0:
+        return []
+
+    sqrt_disc = math.sqrt(disc)
+    points = []
+    for sign in [-1, 1]:
+        t = (-b_coeff + sign * sqrt_disc) / (2 * a_coeff)
+        if -1e-10 <= t <= 1 + 1e-10:
+            ix = sx + t * ddx
+            iy = sy + t * ddy
+            angle = math.atan2(iy - arc_sc.y, ix - arc_sc.x)
+            if _angle_on_arc(angle, arc_sc):
+                points.append((ix, iy))
+
+    return points
+
+
+def _segment_segment_intersection(
+    p1: tuple[float, float], p2: tuple[float, float],
+    p3: tuple[float, float], p4: tuple[float, float],
+) -> list[tuple[float, float]]:
+    """Find intersection of two line segments."""
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
+    x4, y4 = p4
+
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(denom) < 1e-14:
+        return []
+
+    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
+    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
+
+    if -1e-10 <= t <= 1 + 1e-10 and -1e-10 <= u <= 1 + 1e-10:
+        return [(x1 + t * (x2 - x1), y1 + t * (y2 - y1))]
+
+    return []
+
+
+def _semicircle_endpoints(sc: Semicircle) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return the two flat-edge endpoints of a semicircle."""
+    from .config import RADIUS
+    a1 = sc.theta - math.pi / 2
+    a2 = sc.theta + math.pi / 2
+    return (
+        (sc.x + RADIUS * math.cos(a1), sc.y + RADIUS * math.sin(a1)),
+        (sc.x + RADIUS * math.cos(a2), sc.y + RADIUS * math.sin(a2)),
+    )
+
+
 def semicircles_overlap(a: Semicircle, b: Semicircle) -> bool:
-    """Return True if two semicircles have overlapping interior area."""
-    pa = semicircle_polygon(a)
-    pb = semicircle_polygon(b)
-    return pa.intersection(pb).area > OVERLAP_TOL
+    """Analytical overlap check: True if two semicircles share positive interior area.
+
+    A semicircle is the intersection of a disk and a half-plane, so overlap is
+    checked via: (1) interior point containment, and (2) boundary crossings
+    (arc-arc, arc-segment, segment-segment). No polygon approximation.
+    """
+    from .config import RADIUS
+
+    # Quick reject: centers too far apart for any overlap
+    if math.hypot(a.x - b.x, a.y - b.y) > 2 * RADIUS:
+        return False
+
+    # (1) Check if characteristic interior points of one are inside the other
+    for s1, s2 in [(a, b), (b, a)]:
+        # Interior point along the theta direction
+        for frac in [0.3, 0.6]:
+            px = s1.x + frac * RADIUS * math.cos(s1.theta)
+            py = s1.y + frac * RADIUS * math.sin(s1.theta)
+            if _point_strictly_inside_semicircle(px, py, s2):
+                return True
+        # Flat-edge endpoints (on the boundary of s1, but could be inside s2)
+        for ep in _semicircle_endpoints(s1):
+            if _point_strictly_inside_semicircle(ep[0], ep[1], s2):
+                return True
+        # Arc midpoint (on boundary of s1, could be inside s2)
+        arc_mid_x = s1.x + RADIUS * math.cos(s1.theta)
+        arc_mid_y = s1.y + RADIUS * math.sin(s1.theta)
+        if _point_strictly_inside_semicircle(arc_mid_x, arc_mid_y, s2):
+            return True
+
+    # (2) Check boundary crossings
+    a_e1, a_e2 = _semicircle_endpoints(a)
+    b_e1, b_e2 = _semicircle_endpoints(b)
+
+    all_crossings: list[tuple[float, float]] = []
+    all_crossings.extend(_arc_arc_intersections(a, b))
+    all_crossings.extend(_arc_segment_intersections(a, b_e1, b_e2))
+    all_crossings.extend(_arc_segment_intersections(b, a_e1, a_e2))
+    all_crossings.extend(_segment_segment_intersection(a_e1, a_e2, b_e1, b_e2))
+
+    if len(all_crossings) >= 2:
+        # Two convex shapes with 2+ boundary crossings overlap unless
+        # the crossings are only at shared vertices (e.g. flat edges meeting
+        # at a point). Check if the midpoint between any two crossings is
+        # strictly inside both semicircles.
+        for i in range(len(all_crossings)):
+            for j in range(i + 1, len(all_crossings)):
+                mid_x = (all_crossings[i][0] + all_crossings[j][0]) / 2
+                mid_y = (all_crossings[i][1] + all_crossings[j][1]) / 2
+                if (_point_strictly_inside_semicircle(mid_x, mid_y, a)
+                        and _point_strictly_inside_semicircle(mid_x, mid_y, b)):
+                    return True
+
+    return False
 
 
 def farthest_boundary_point_from(sc: Semicircle, qx: float, qy: float) -> tuple[float, float]:
